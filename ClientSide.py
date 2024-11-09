@@ -6,34 +6,43 @@ import threading
 import customtkinter as ctk
 from datetime import datetime
 import ssl
+import multiprocessing
 import struct
 
+# Global Vars
 # Declare config settings for the server
-SERVER_HOST = "5.75.133.232"
-SERVER_PORT = 8080
+SERVER_HOST = "91.107.238.150"
+SERVER_PORT = 8000
+MIN_READING_INTERVAL = 15
+MAX_READING_INTERVAL = 60
+#modularising the program
 
 
 class SmartMeterGUI(ctk.CTk):
-    # SmartMeterGUI() Class:
-    # Handles functionality related to the client side, draws relevant customtkinter GUI elements & updates them. 
-    # Also handles behaviours such as sending reading messages to the server and processing bill responses
-    # from the server.
+    """
+    SmartMeterGUI() Class:
+    Handles functionality related to the client side, draws relevant customtkinter GUI elements & updates them. 
+    Also handles behaviours such as sending reading messages to the server and processing bill responses
+    from the server.
+    """
     
     def __init__(self, id):
-        # SmartMeterGUI() Constructor:
-        # Creates window with all relevant customtkinter GUI elements, each elemeent is given an 'initial value'
-        # that is held until the first bill response is recieved from the server.
-
+        """
+        SmartMeterGUI() Constructor:
+        Creates window with all relevant customtkinter GUI elements, each elemeent is given an 'initial value'
+        that is held until the first bill response is recieved from the server.
+        """
         super().__init__()
         # SmartMeter  properties:id, title, size, bg colour.
+        self.socket_lock = threading.Lock()
         self.id = id
         self.title("Smart Meter")
-        self.geometry("480x250")
+        self.geometry("540x250")
         self.configure(bg="black")
 
         # Date and time display : Shows current date/time.
         self.time_label = ctk.CTkLabel(self, text="", font=("Arial", 12), text_color="white")
-        self.time_label.place(x=250, y=10)  
+        self.time_label.place(x=310, y=10)  
 
         # Electricity Icon : Image on GUI.
         self.electric_icon_label = ctk.CTkLabel(self, text="⚡", font=("Arial", 40), text_color="yellow")
@@ -79,12 +88,14 @@ class SmartMeterGUI(ctk.CTk):
         # Declare attributes for readings & billing info from server & assign default values.
         self.cumulative_reading = 0.0
         self.total_bill = 0.0
-        self.units_used = 0.0
+        self.units_start = 0.0
+        self.units_end = 0.0
         self.standing_charge = 0.0
         self.price_per_unit = 0.0
         self.billing_period = 0
 
-        self.started = None
+        # Flag to remember whether 'last updated:' status loggin has started.
+        self.last_update_started = None
 
     def update_time(self):
         # update_time() Method:
@@ -117,6 +128,8 @@ class SmartMeterGUI(ctk.CTk):
         # Update labels (column 2 : Standing charge & billing period info)
         self.standing_charge_label.configure(text=f"Standing Charge: £{standing_charge:.2f}")
         self.billing_period_label.configure(text=f"Billing Period: {billing_period}")
+        # Set comms status back to 'Connected'.
+        self.status_label.configure("Connected")
 
 
     def set_status(self, message):
@@ -126,6 +139,7 @@ class SmartMeterGUI(ctk.CTk):
 
 
     def trigger_reading_event(self):
+        # trigger_reading_event() Method:
         # Generate a new reading
         new_reading = generate_meter_reading()
 
@@ -142,34 +156,61 @@ class SmartMeterGUI(ctk.CTk):
         
 
 
-    def response_from_server(self, reading_data):
-        # response_from_server() Method :
-        # Sends the reading to the server and checks to see if server responds, if response received, update GUI elements.
-
-        # sends reading to server using reading_data, returns server response.
-        response = send_reading_to_server(self.sock, reading_data)
-
-        # Handle response received from server.
+    def response_from_server(self, reading_data, timeout=120):
+        """
+        Sends the reading to the server and checks if the server responds.
+        Only makes one attempt.
+        """
+        # Send the reading to the server
+        with self.socket_lock:
+            response = send_reading_to_server(self.sock, reading_data, timeout)
         if response:
-            print(f"Server response: {response}")
+            print(f"Client {self.id} Server response: {response}")
             try:
                 # Decode the message from the server
                 message_data = json.loads(response)
+                if "type" not in message_data:
+                    print("Invalid response: Missing 'type' field")
+                    return None
                 self.handle_server_message(message_data)
+                return response  # Successfully processed
             except (json.JSONDecodeError, ValueError) as e:
-                # If the response isn't able to be decoded from object to string, output error & set status as 'Error'.
-                print(f"Error parsing server response: {e}")
+                # Error decoding server response
+                print(f"Client {self.id} Error parsing server response: {e}")
                 self.set_status("Error")
+                return None
         else:
-            # No response from server, set status as 'Disconnected'.
-            print("Disconnected from server, will retry")
-            # Try to reconnect.
-            run_client(self, id)
+            # No response received
+           
+            self.set_status("Disconnected")
+            self.reconnect(reading_data, timeout)
+            return None
+    
+    def reconnect(self, reading_data, timeout):
+        """
+        Attempts to reconnect to the server.
+        You can add logic here to handle specific reconnection attempts.
+        """
+        try:
+            if self.sock:
+                self.sock.close()
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.connect((SERVER_HOST, SERVER_PORT))
+            print("Reconnected to server.")
+            self.set_status("Connected")
+            send_reading_to_server(self.sock, reading_data, timeout)
+        except socket.error as e:
+            print(f"Error reconnecting to server: {e}")
+            self.set_status("Error")
+
+
 
     def handle_server_message(self, message_data):
-        # handle_server_message() Method:
-        # Handles received JSON message & unpacks data into variables for the smart meter. Calls method to update  
-        # the SmartMeterGUI elements.
+        """
+        handle_server_message() Method:
+        Handles received JSON message & unpacks data into variables for the smart meter. Calls method to update  
+        the SmartMeterGUI elements.
+        """
         try:
 
             # Handle bill data.
@@ -180,7 +221,8 @@ class SmartMeterGUI(ctk.CTk):
                 # Unpack bill data safely using .get() to avoid missing key issues
                 standing_charge = bill_info.get('standing_charge', 0.0)
                 total = bill_info.get('total', 0.0)  # This is the new total usage cost
-                units_used = bill_info.get('units_used', 0.0)
+                units_start = bill_info.get('units_start', 0.0)
+                units_end = bill_info.get('units_end', 0.0)
                 price_per_unit = bill_info.get('price_per_unit', 0.0)
                 daily_standing_charge = bill_info.get('daily_standing_charge', 0.0)
                 billing_period = bill_info.get('billing_period', {})
@@ -198,7 +240,7 @@ class SmartMeterGUI(ctk.CTk):
                 self.daily_standing_charge = daily_standing_charge
                 self.price_per_unit = price_per_unit
                 self.billing_period = billing_period_str  
-                self.units_used = units_used
+                self.units_used = units_end - units_start 
 
                 # Update the GUI with the new data
                 self.after(1, self.update_GUI,
@@ -209,7 +251,7 @@ class SmartMeterGUI(ctk.CTk):
                         self.billing_period)
 
             # Handle power grid issue data.
-            elif message_data.get("type") == "PowerGridDown":
+            elif message_data.get("type") == "PowerGridIssue":
                 # Unpack power grid issue data safely using .get() to avoid missing key issues.
                 error_info = message_data
                 print(error_info)
@@ -225,22 +267,25 @@ class SmartMeterGUI(ctk.CTk):
         except Exception as e:
             print(e)
 
-    def updatetime(self, started):
-    # Start counting up in seconds
-        # Start counting up in seconds and update the label every second.
-        self.seconds = 0  # Initialize seconds counter
+    def update_last_updated(self, started):
+        # update_last_updated() Method:
+        # Start counting up in seconds and update 'last update:' label every second.
+        
+        # Initialize seconds counter
+        self.last_updated_seconds = 0  
         def update_label():
-            # Increment seconds
-            print("based")
-            self.seconds += 1
+            # Increment seconds.
             
-            # Update the label text
-            self.last_update_label.configure(text=f"Last Update: {self.seconds} seconds ago")
+            self.last_updated_seconds += 1
             
-            # Call update_label again after 1000 ms (1 second)
+            # Update the label text.
+            self.last_update_label.configure(text=f"Last Update: {self.last_updated_seconds} seconds ago")
+            
+            # Call update_label again after 1000 ms.
             self.after(1000, update_label)
-        if self.started == None:
-            self.started = started
+        # sets flag to true on first pass, ensures that 'update_label' code is only executed once.
+        if self.last_update_started == None:
+            self.last_update_started = started
             update_label()
     
 
@@ -250,9 +295,8 @@ class SmartMeterGUI(ctk.CTk):
 
         while True:
             self.trigger_reading_event()  # Trigger the reading event.
-            self.updatetime(True)
-            next_bill = random.uniform(15, 60)
-            print("next bill in " + str(next_bill))
+            self.update_last_updated(True)
+            next_bill = random.uniform(MIN_READING_INTERVAL, MAX_READING_INTERVAL)
             time.sleep(next_bill) # Wait random time to send next reading.
             
   
@@ -265,52 +309,81 @@ def generate_meter_reading():
     return round(random.uniform(0.5, 5.0), 2)  
 
 
-def send_reading_to_server(sock, reading_data):
-    # send_reading_to_server() Function.
-    # Function to send data to the Rust server, packs into valid JSON format & sends to server. 
-    # Awaits response from server, if response received return response.
-
+def send_reading_to_server(sock, reading_data, timeout=120):
     try:
-        # Convert the reading data to JSON.
+        # Ensure the socket is still open before attempting to send data
+        if sock.fileno() == -1:  # Check if the socket is closed
+            print("Socket is closed, attempting to reconnect...")
+            return "Error: Socket is closed"
+
+        # Set socket timeout
+        sock.settimeout(timeout)
+
+        # Convert the reading data to JSON
         json_data = json.dumps(reading_data).encode('utf-8')
 
-        # Calculate the length of the JSON data.
+        # Calculate the length of the JSON data
         data_length = len(json_data)
 
-        # Pack the length as a 2-byte header (little-endian format).
+        # Pack the length as a 2-byte header (big-endian format)
         header = struct.pack('>H', data_length)
 
-        # Send the header first, followed by the JSON data.
-        sock.sendall(header + json_data)
+        # Send the header first, followed by the JSON data in chunks
+        total_sent = 0
+        data_to_send = header + json_data
 
-        # Wait for the server's response. Allowing enough buffer size for the response (1024 bytes).
-        response = sock.recv(1024)
+        # Ensure that all data is sent using the SSL socket
+        while total_sent < len(data_to_send):
+            try:
+                sent = sock.send(data_to_send[total_sent:])
+                if sent == 0:
+                    raise RuntimeError("Socket connection broken")
+                total_sent += sent
+            except socket.error as e:
+                print(f"Error while sending data: {e}")
+                return "Error sending data to server."  # Return error message if sending fails
+
+        
+        print("Meter reading sent")
+
+        # Wait for the server's response
+        response = sock.recv(2048)
         if len(response) == 0:
+            print("Server disconnected")
             return None
-        # Removes header from server message using the message length.
+        # Remove the header from the server's message using the message length
         header = response[:2]
         message_length = struct.unpack('>H', header)[0]
-        actual_message = response[2:2+message_length].decode('utf-8')
-        if actual_message: # Response received.
+        actual_message = response[2:2 + message_length].decode('utf-8')
+
+        if actual_message:  # Response received
             return actual_message
-        else: # Empty Response.
+        else:  # Empty response
             return None
-        
-    except socket.error as e:  #???TO BE REMOVED??? - Could this be a receive error? Could we split this up into 'Error sending data' / 'Error receiving data'.
-        # Print error message if any errors are found when sending the reading to server or receiving the response.
-        print(f"Error sending/rec data: {e}")
-        return None
+
+    except socket.timeout:
+        print("Timeout: Server did not respond in time.")
+        return "Timeout: Server did not respond in time."  # Return timeout message if server response is delayed
+    except (ssl.SSLError, socket.error) as e:
+        print(f"Error sending or receiving data: {e}")
+        return f"Error: {e}"  # Return socket/SSL error message
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        return f"Unexpected error: {e}"  # Return any unexpected error message
+
 
 
 # Function to authenticate with the server
 def authenticate(sock, id):
-    # authenticate() Function.
-    # Attempts to authenticate the client to the server. Sends an authentication message of Id number as int + string, awaits
-    # response from server, and checks whether the authentication was successful ('Authentication successful').
+    """"
+    authenticate() Function.
+    Attempts to authenticate the client to the server. Sends an authentication message of Id number as int + string, awaits
+    response from server, and checks whether the authentication was successful ('Authentication successful').
+    """
     
     try:
         # Set maximum allowable time for the authentication response to be received.
-        sock.settimeout(10)
+        sock.settimeout(5)
         # Using the ID, create a JSON encoded message to be sent to the server.
         auth_message = json.dumps({"id": id,"token": str(id)}).encode('utf-8')
         # Adds 2 byte header (big-endian format)
@@ -343,36 +416,66 @@ def authenticate(sock, id):
         return False
 
 
-# Main function to handle communication with the server
-def run_client(frame, id):
-    # run_client() Function.
-    # Main client function: connects to the server, authenticates and then communicates to server with readings.
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        try:
-            # Try to connect to server.
-            print(id)
-            sock.connect((SERVER_HOST, SERVER_PORT))
-            frame.set_status("Connected")
-            print(f"Connected to server {SERVER_HOST}:{SERVER_PORT}")
+def run_client(frame, id, max_retries=5):
+    """
+    Main client function: connects to the server using SSL, authenticates, 
+    and then communicates with the server with readings.
+    """
+    
+    # Create a context that is meant for client connections
+    context = ssl.create_default_context()  # Default context is for client-side communication
+    
+    # Load the server's certificate for verification
+    context.load_verify_locations(cafile="./Certificates/server.crt")
+    context.check_hostname = False
 
-            # Authenticate the client with the server.
-            if not authenticate(sock,id):
-                frame.set_status("Authentication Failed")
-                return
+    # Verify the server's certificate (still check the validity of the server's certificate)
+    context.verify_mode = ssl.CERT_REQUIRED
 
-            # Store the socket in the frame
-            frame.sock = sock  
-            # Start the reading events.
-            frame.start_reading_events()  
+    retry_count = 0  # Initialize retry counter
 
-        except socket.error as e:
-            # If any problems occur when connecting to server it is caught and displays an error message.
-            print(f"Failed to connect to server: {e}")
-            frame.set_status("Connection Failed")
-            time.sleep(5)
-            # Tries to connect to server again -- need to put a max limit on this really -- maybe 3 tries.
-            run_client(frame)
+    while retry_count < max_retries:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                # Attempt to connect to the server
+                sock.connect((SERVER_HOST, SERVER_PORT))
+
+                # Wrap the socket with SSL
+                ssl_sock = context.wrap_socket(sock, server_hostname=SERVER_HOST)
+
+                frame.set_status("Connected")
+                print(f"Connected to server {SERVER_HOST}:{SERVER_PORT} with SSL")
+
+                # Authenticate the client with the server
+                if not authenticate(ssl_sock, id):
+                    frame.set_status("Authentication Failed")
+                    return
+
+                # Store the SSL socket in the frame
+                frame.sock = ssl_sock
+
+                # Start the reading events
+                frame.start_reading_events()
+
+                return  # Exit the loop and function if successful
+
+            except ssl.SSLError as e:
+                print(f"SSL Error: {e}")
+                frame.set_status("SSL Error")
+                break  # Stop retrying on SSL errors
+
+            except socket.error as e:
+                retry_count += 1
+                print(f"Failed to connect to server: {e}")
+                frame.set_status(f"Connection Failed, retrying")
+
+                if retry_count < max_retries:
+                    time.sleep(5)  # Wait before retrying
+                else:
+                    print("Max retries reached.")
+                    frame.set_status("Max Connection Attempts Reached")
+
 
 
 def create_client(id):
@@ -382,29 +485,25 @@ def create_client(id):
     app.mainloop()
 
 
-if __name__ == "__main__":
-    # Initates the smartmeter gui for x no of Clients.
 
-    # Set default appearance mode & colour theme.
+if __name__ == "__main__":
+    # Set default appearance mode and color theme
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("green")
 
-    # Desired number of clients (adjustable)
-    num_clients = 1
-    # List to keep track of threads
-    threads = []
+    # Desired number of clients
+    num_clients = 12
+    processes = []
 
-    # Create x no of clients.
+    # Create processes to make new client gui's with a thread safe method
     for id in range(num_clients):
-        # Start each client in a new thread.
-        client_thread = threading.Thread(target=create_client, args=(id,))
-        client_thread.start()
-        # 1 second delay between starting each client.
-        time.sleep(1)
-        # Store thread reference.
-        threads.append(client_thread)  
+        #https://stackoverflow.com/questions/73208502/python-multiprocessing-with-tkinter-on-windows
+        client_process = multiprocessing.Process(target=create_client, args=((id+12),))
+        client_process.start()
+        time.sleep(1)  # Delay between starting each client
+        processes.append(client_process)
 
-    # Wait for all threads to finish
-    for thread in threads:
-        thread.join()
+    # Wait for all processes to complete
+    for process in processes:
+        process.join()
         
