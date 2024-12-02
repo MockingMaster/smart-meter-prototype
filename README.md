@@ -22,3 +22,25 @@ cargo run [--release]
 ```
 cargo test
 ```
+
+
+
+## Client Setup
+
+Requires latest version of Python3.
+
+pip install:
+customtkinter
+socket
+json
+time
+random
+threading
+ssl
+multiprocessing
+datetime
+struct
+queue
+
+Numer of clients adjustable in "__main__".
+
