@@ -16,6 +16,6 @@ tokio-test = "0.4.4"
 bytes = "1.8.0"
 serde = { version = "1.0.213", features = ["derive"] }
 chrono = { version = "0.4.38", features = ["serde"] }
-mock-database = { path = "../mock-database/" }
+mock-database = { path = "./mock-database/" }
 bcrypt = "0.16.0"
 rand = "0.8.5"
