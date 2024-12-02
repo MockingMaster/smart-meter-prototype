@@ -30,17 +30,17 @@ cargo test
 Requires latest version of Python3.
 
 pip install:
-customtkinter
-socket
-json
-time
-random
-threading
-ssl
-multiprocessing
-datetime
-struct
-queue
+customtkinter  
+socket  
+json  
+time  
+random  
+threading  
+ssl  
+multiprocessing  
+datetime  
+struct  
+queue  
 
 Numer of clients adjustable in "__main__".
 
