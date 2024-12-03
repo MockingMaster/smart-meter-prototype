@@ -7,6 +7,7 @@ The server requires HAProxy to handle TLS, this can be installed using a package
 Debian based: apt install haproxy  
 
 Certificates/haproxy.pem needs to be moved to `/etc/ssl/certs/haproxy.pem`
+Move haproxy.cfg to `/etc/haproxy`
 
 Start haproxy service:
 
